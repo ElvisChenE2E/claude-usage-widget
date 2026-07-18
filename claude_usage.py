@@ -20,6 +20,7 @@ import os
 import re
 import json
 import math
+import time
 import threading
 import urllib.request
 from datetime import datetime, timezone
@@ -350,11 +351,13 @@ def _rows_from_util(util):
             label, short = "Weekly (7 day)", "7d"
         rows.append({"label": label, "short": short,
                      "pct": it.get("percent", 0),
+                     "resets_at": it.get("resets_at"),
                      "reset": fmt_reset(it.get("resets_at"))})
     return rows
 
 
 def fetch_live():
+    """Returns (rows, dt, 'live'), 'ratelimited', or None."""
     try:
         with open(CREDS_PATH, "r", encoding="utf-8") as f:
             creds = json.load(f)
@@ -372,6 +375,9 @@ def fetch_live():
         rows = _rows_from_util(data)
         if rows:
             return rows, datetime.now(timezone.utc), "live"
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            return "ratelimited"
     except Exception:
         pass
     return None
@@ -392,8 +398,59 @@ def fetch_cached():
     return [], None, "err"
 
 
-def read_usage():
-    return fetch_live() or fetch_cached()
+LIVE_OK_INTERVAL = 300    # after a successful live call, wait this long (s)
+LIVE_429_BACKOFF = 600    # after a 429 (when we already have data), back off (s)
+LIVE_RETRY_NODATA = 30    # retry sooner while we have no live data yet (s)
+
+
+class UsageSource:
+    """Live-first data source with rate-limit backoff.
+
+    The usage endpoint is shared with Claude Code itself and rate-limits
+    aggressively, so we only hit it every LIVE_OK_INTERVAL seconds and back
+    off harder on 429. Between live calls we reuse the last live result
+    (recomputing the reset countdowns) rather than flapping back to the
+    stale file cache.
+    """
+    def __init__(self):
+        self._blocked_until = 0.0
+        self._last = None            # (rows, dt)
+
+    def get(self):
+        now = time.time()
+        if now >= self._blocked_until:
+            res = fetch_live()
+            if not isinstance(res, tuple) and self._last is None:
+                # the endpoint rate-limits intermittently; while we have no
+                # live data yet, retry a few times within this cycle
+                for _ in range(3):
+                    time.sleep(4)
+                    res = fetch_live()
+                    if isinstance(res, tuple):
+                        break
+            if isinstance(res, tuple):
+                # fresh data straight from the API this cycle -> LIVE
+                self._last = (res[0], res[1])
+                self._blocked_until = now + LIVE_OK_INTERVAL
+                rows, dt = self._last
+                for r in rows:
+                    r["reset"] = fmt_reset(r.get("resets_at"))
+                return rows, dt, "live"
+            elif self._last is None:
+                # no data yet — keep trying soon so first LIVE arrives fast
+                self._blocked_until = now + LIVE_RETRY_NODATA
+            elif res == "ratelimited":
+                self._blocked_until = now + LIVE_429_BACKOFF
+            else:
+                self._blocked_until = now + LIVE_OK_INTERVAL
+        # not fetched fresh this cycle: reuse the last successful LIVE data,
+        # labelled CACHED, keeping the time it was actually fetched.
+        if self._last:
+            rows, dt = self._last
+            for r in rows:               # keep the reset countdowns ticking
+                r["reset"] = fmt_reset(r.get("resets_at"))
+            return rows, dt, "cache"
+        return fetch_cached()
 
 
 def bar_color(pct):
@@ -431,7 +488,10 @@ def rounded_pts(x0, y0, x1, y1, r):
 class UsageApp:
     def __init__(self):
         self.cfg = load_config()
+        self.source = UsageSource()
         self.expanded = False
+        self.src = ""
+        self.time_text = ""
         self.rows_data = []
         self.src_text = ""
         self._phase = 0.0
@@ -459,27 +519,40 @@ class UsageApp:
         w.bind("<Button-1>", self._start_move)
         w.bind("<B1-Motion>", self._on_move)
         w.bind("<ButtonRelease-1>", self._on_release)
+        w.bind("<Double-Button-1>", self._on_double)
 
     def _start_move(self, e):
         self._mx, self._my = e.x_root, e.y_root
         self._gx, self._gy = self.root.winfo_x(), self.root.winfo_y()
-        self._moved = False
 
     def _on_move(self, e):
         dx, dy = e.x_root - self._mx, e.y_root - self._my
-        if abs(dx) + abs(dy) > 3:
-            self._moved = True
         self.root.geometry(f"+{self._gx + dx}+{self._gy + dy}")
 
+    def _toggle(self):
+        self.expanded = not self.expanded
+        self._render()
+
+    def _on_double(self, e):
+        self._dragged = False        # a double-click is never a drag
+        self._toggle()
+        return "break"
+
+    def _indicator(self, parent, size=6):
+        """A small 'LIVE'/'CACHED' text label in the accent color."""
+        live = self.src == "live"
+        lbl = tk.Label(parent, text="LIVE" if live else "CACHED", bg=BG,
+                       fg=CORAL, font=("Segoe UI", size, "bold"),
+                       padx=0, pady=0, bd=0)
+        return lbl, lbl
+
     def _on_release(self, e):
-        if getattr(self, "_moved", False):
-            # remember where the user dropped it (anchor = bottom-right corner)
+        # left button drags only; expand/collapse is on right-click
+        if abs(e.x_root - self._mx) + abs(e.y_root - self._my) > 3:
+            # dragged: remember drop position (anchor = bottom-right corner)
             self.root.update_idletasks()
             self._anchor = (self.root.winfo_x() + self.root.winfo_width(),
                             self.root.winfo_y() + self.root.winfo_height())
-        else:
-            self.expanded = not self.expanded
-            self._render()
 
     def _place_bottom_right(self):
         self.root.update_idletasks()
@@ -544,6 +617,7 @@ class UsageApp:
             self._bind_move(w)
 
     def _render_full(self):
+        BAR_W, BAR_H = 200, 14
         head = tk.Frame(self.content, bg=BG)
         head.pack(fill="x", padx=9, pady=(6, 2))
         ClaudeIcon(head, size=16).pack(side="left")
@@ -555,8 +629,13 @@ class UsageApp:
         close.bind("<Button-1>", lambda e: self.root.destroy())
         close.bind("<Enter>", lambda e: close.config(fg=CORAL))
         close.bind("<Leave>", lambda e: close.config(fg=DIM))
-        tk.Label(head, text=self.src_text, bg=BG, fg=DIM,
-                 font=("Segoe UI", 7)).pack(side="right", padx=(14, 0))
+        self._no_move = {close}   # keep its click binding; skip in bind loop
+        # LIVE/CACHED indicator + fetch time (replaces the old "live HH:MM")
+        ind, _ = self._indicator(head, size=5)
+        ind.pack(side="right", padx=(6, 0))
+        if self.time_text:
+            tk.Label(head, text=self.time_text, bg=BG, fg=DIM,
+                     font=("Segoe UI", 7)).pack(side="right", padx=(10, 0))
         for r in self.rows_data:
             block = tk.Frame(self.content, bg=BG)
             block.pack(fill="x", padx=9, pady=(7, 0))
@@ -564,29 +643,40 @@ class UsageApp:
             top.pack(fill="x")
             tk.Label(top, text=r["label"], bg=BG, fg=FG,
                      font=("Segoe UI", 8)).pack(side="left")
-            tk.Label(top, text=f"{r['pct']}%", bg=BG, fg=FG,
-                     font=("Segoe UI", 8, "bold")).pack(side="right")
-            c = tk.Canvas(block, width=190, height=4, bg=TRACK,
+            reset_txt = ("Resetting…" if r["reset"] == "resetting"
+                         else f"Resets in {r['reset']}")
+            tk.Label(top, text=reset_txt, bg=BG, fg=DIM,
+                     font=("Segoe UI", 7)).pack(side="right")
+            # gauge: thick bar with the percentage printed on it
+            c = tk.Canvas(block, width=BAR_W, height=BAR_H, bg=TRACK,
                           highlightthickness=0)
-            c.pack(fill="x", pady=(3, 1))
+            c.pack(fill="x", pady=(3, 0))
             pct = max(0, min(100, r["pct"]))
-            if pct:
-                c.create_rectangle(0, 0, int(190 * pct / 100), 4,
+            fill_w = int(BAR_W * pct / 100)
+            if fill_w:
+                c.create_rectangle(0, 0, fill_w, BAR_H,
                                    fill=bar_color(pct), outline="")
-            tk.Label(block, text=f"Resets in {r['reset']}", bg=BG, fg=DIM,
-                     font=("Segoe UI", 7), anchor="w").pack(fill="x")
-        tip = tk.Label(self.content, text="click to collapse",
-                       bg=BG, fg=DIM, font=("Segoe UI", 7))
-        tip.pack(pady=(6, 5))
+            # put the % label inside the filled part if it fits, else after it
+            txt = f"{r['pct']}%"
+            if fill_w > 34:
+                c.create_text(fill_w - 5, BAR_H // 2, text=txt, anchor="e",
+                              fill="#1d1d1b", font=("Segoe UI", 8, "bold"))
+            else:
+                c.create_text(fill_w + 5, BAR_H // 2, text=txt, anchor="w",
+                              fill=FG, font=("Segoe UI", 8, "bold"))
+        tk.Frame(self.content, bg=BG, height=7).pack()
+        skip = getattr(self, "_no_move", set())
         for w in self.content.winfo_children():
-            self._bind_move(w)
+            if w not in skip:
+                self._bind_move(w)
             for cc in w.winfo_children():
-                self._bind_move(cc)
+                if cc not in skip:
+                    self._bind_move(cc)
 
     # ---- data ----
     def refresh(self):
         def work():
-            rows, dt, src = read_usage()
+            rows, dt, src = self.source.get()
             self.root.after(0, lambda: self._got(rows, dt, src))
         threading.Thread(target=work, daemon=True).start()
         self.root.after(int(self.cfg.get("refresh_seconds", 60)) * 1000,
@@ -594,8 +684,10 @@ class UsageApp:
 
     def _got(self, rows, dt, src):
         self.rows_data = rows
+        self.src = src
+        self.time_text = f"{dt.astimezone():%H:%M}" if dt else ""
         if src == "live":
-            self.src_text = "live"
+            self.src_text = f"live {dt.astimezone():%H:%M}" if dt else "live"
         elif dt:
             self.src_text = f"cached {dt.astimezone():%H:%M}"
         else:
