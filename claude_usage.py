@@ -44,6 +44,7 @@ DEFAULT_CONFIG = {
     "margin": 16,
     "taskbar_height": 48,
     "glow": True,
+    "icon_style": "logo",   # "logo" or "mascot" (click the icon to switch)
 }
 
 # --- Claude-style dark palette ---
@@ -300,6 +301,77 @@ class ClaudeIcon(tk.Label):
     def __init__(self, parent, size=15, color=CORAL, bg=BG, **kw):
         self._img = _rasterize_logo(size, color, bg)
         super().__init__(parent, image=self._img, bg=bg, bd=0, **kw)
+
+
+# Claude mascot ("Clawd") as 2-frame pixel art: legs alternate and the
+# claws bob, giving it a little walk-in-place wiggle.
+MASCOT_FRAMES = [
+    [
+        "...##########...",
+        "...##########...",
+        "...#..####..#...",
+        "...#..####..#...",
+        "...##########...",
+        "################",
+        "################",
+        "..############..",
+        "..############..",
+        "...##.##..##.##.",
+        "...##.##..##.##.",
+    ],
+    [
+        "...##########...",
+        "...##########...",
+        "...#..####..#...",
+        "...#..####..#...",
+        "################",
+        "################",
+        "..############..",
+        "..############..",
+        "..############..",
+        "..##.##..##.##..",
+        "..##.##..##.##..",
+    ],
+]
+_MASCOT_CACHE = {}
+
+
+def _rasterize_mascot(size, color=CORAL, bg=BG):
+    """Render both mascot frames as PhotoImages scaled to ~size px wide."""
+    key = (size, color, bg)
+    if key in _MASCOT_CACHE:
+        return _MASCOT_CACHE[key]
+    cols, rows = len(MASCOT_FRAMES[0][0]), len(MASCOT_FRAMES[0])
+    cell = max(1, size // cols)
+    w, h = cols * cell, rows * cell
+    imgs = []
+    for grid in MASCOT_FRAMES:
+        img = tk.PhotoImage(width=w, height=h)
+        img.put(bg, to=(0, 0, w, h))
+        for y, line in enumerate(grid):
+            for x, ch in enumerate(line):
+                if ch == "#":
+                    img.put(color, to=(x * cell, y * cell,
+                                       (x + 1) * cell, (y + 1) * cell))
+        imgs.append(img)
+    _MASCOT_CACHE[key] = imgs
+    return imgs
+
+
+class MascotIcon(tk.Label):
+    """Animated Claude mascot (2-frame pixel wiggle)."""
+    def __init__(self, parent, size=15, color=CORAL, bg=BG, **kw):
+        self._frames = _rasterize_mascot(max(size, 14), color, bg)
+        self._fi = 0
+        super().__init__(parent, image=self._frames[0], bg=bg, bd=0, **kw)
+        self._tick()
+
+    def _tick(self):
+        if not self.winfo_exists():
+            return
+        self._fi = (self._fi + 1) % len(self._frames)
+        self.configure(image=self._frames[self._fi])
+        self.after(420, self._tick)
 
 
 # ----------------- data -----------------
@@ -559,6 +631,7 @@ class UsageApp:
         self.expanded = False
         self.src = ""
         self.time_text = ""
+        self.icon_style = self.cfg.get("icon_style", "logo")
         self.rows_data = []
         self.src_text = ""
         self._phase = 0.0
@@ -603,6 +676,33 @@ class UsageApp:
     def _on_double(self, e):
         self._dragged = False        # a double-click is never a drag
         self._toggle()
+        return "break"
+
+    # ---- icon (logo <-> mascot, click the icon to switch) ----
+    def _make_icon(self, parent, size=16):
+        cls = MascotIcon if self.icon_style == "mascot" else ClaudeIcon
+        icon = cls(parent, size=size)
+        icon.configure(cursor="hand2")
+        icon.bind("<Button-1>", self._start_move)
+        icon.bind("<B1-Motion>", self._on_move)
+        icon.bind("<ButtonRelease-1>", self._icon_release)
+        icon.bind("<Double-Button-1>", lambda e: "break")
+        return icon
+
+    def _icon_release(self, e):
+        # plain click on the icon switches style; a drag still moves
+        if abs(e.x_root - self._mx) + abs(e.y_root - self._my) > 3:
+            self._on_release(e)
+        else:
+            self.icon_style = ("mascot" if self.icon_style == "logo"
+                               else "logo")
+            self.cfg["icon_style"] = self.icon_style
+            try:
+                with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                    json.dump(self.cfg, f, indent=2)
+            except OSError:
+                pass
+            self._render()
         return "break"
 
     def _indicator(self, parent, size=6):
@@ -658,9 +758,8 @@ class UsageApp:
         row = tk.Frame(self.content, bg=BG)
         row.pack(padx=8, pady=4)
         widgets = [row]
-        icon = ClaudeIcon(row, size=16)
+        icon = self._make_icon(row, size=16)
         icon.grid(row=0, column=0, rowspan=2, padx=(0, 8), sticky="w")
-        widgets.append(icon)
         for i, r in enumerate(self.rows_data):
             col = i + 1
             lb = tk.Label(row, text=f"{r['short']} {r['pct']}%", bg=BG, fg=FG,
@@ -687,7 +786,8 @@ class UsageApp:
         BAR_W, BAR_H = 200, 14
         head = tk.Frame(self.content, bg=BG)
         head.pack(fill="x", padx=9, pady=(6, 2))
-        ClaudeIcon(head, size=16).pack(side="left")
+        icon = self._make_icon(head, size=16)
+        icon.pack(side="left")
         tk.Label(head, text=" Claude Usage", bg=BG, fg=FG,
                  font=("Segoe UI", 9, "bold")).pack(side="left")
         close = tk.Label(head, text="✕", bg=BG, fg=DIM, cursor="hand2",
@@ -696,7 +796,7 @@ class UsageApp:
         close.bind("<Button-1>", lambda e: self.root.destroy())
         close.bind("<Enter>", lambda e: close.config(fg=CORAL))
         close.bind("<Leave>", lambda e: close.config(fg=DIM))
-        self._no_move = {close}   # keep its click binding; skip in bind loop
+        self._no_move = {close, icon}   # keep their click bindings intact
         # LIVE/CACHED indicator + fetch time (replaces the old "live HH:MM")
         ind, _ = self._indicator(head, size=5)
         ind.pack(side="right", padx=(6, 0))

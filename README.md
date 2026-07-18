@@ -14,6 +14,10 @@ Collapsed, it's a single unobtrusive row. Double-click to expand into gauges.
 
 ![Expanded view](Demo_Expanded.png)
 
+**Mascot** — click the icon to switch between the Claude logo and an animated pixel mascot
+
+![Mascot view](Demo_Mascot.png)
+
 ## How it works
 
 Data sources, in order:
@@ -49,6 +53,7 @@ so just copy this folder to another machine and run it. No API key needed.
 |---|---|
 | Double-click `start_claude_usage.vbs` | Start silently (no console window) |
 | Double-click the widget | Toggle collapsed ⇄ expanded |
+| Click the icon | Switch between the Claude logo and the animated mascot |
 | Drag | Move the widget (it stays where you drop it) |
 | Click the ✕ | Quit |
 
@@ -70,6 +75,7 @@ Startup folder (`Win+R` → `shell:startup`).
 | `margin` | Margin from the bottom-right corner (px) | 16 |
 | `taskbar_height` | Taskbar height to avoid (px) | 48 |
 | `border` | Coral border thickness (px) | 1 |
+| `icon_style` | `logo` or `mascot` (also toggled by clicking the icon) | logo |
 
 Edit, save, then restart the widget.
 
