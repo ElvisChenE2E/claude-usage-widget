@@ -33,9 +33,9 @@ so just copy this folder to another machine and run it.
 | Action | Result |
 |---|---|
 | Double-click `start_claude_usage.vbs` | Start silently (no console) |
-| Left-click widget | Toggle compact ⇄ expanded view |
-| Drag | Move the widget |
-| Right-click | Quit |
+| Click widget | Toggle compact ⇄ expanded view |
+| Drag | Move the widget (stays where you drop it) |
+| Click the ✕ | Quit |
 
 **Start on boot:** create a shortcut to `start_claude_usage.vbs` in the
 Startup folder (`Win+R` → `shell:startup`).
