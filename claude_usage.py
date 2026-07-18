@@ -32,6 +32,11 @@ HOME = os.path.expanduser("~")
 CLAUDE_JSON = os.path.join(HOME, ".claude.json")
 CREDS_PATH = os.path.join(HOME, ".claude", ".credentials.json")
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+# Claude Code's public OAuth client id + token endpoint (used to refresh the
+# access token so the widget stays live without re-opening Claude Code).
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+TOKEN_SKEW_MS = 120_000   # refresh when within 2 min of expiry
 
 DEFAULT_CONFIG = {
     "refresh_seconds": 60,
@@ -356,12 +361,74 @@ def _rows_from_util(util):
     return rows
 
 
+def _read_creds():
+    with open(CREDS_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_creds(creds):
+    """Atomically write the credentials file back (preserve permissions)."""
+    tmp = CREDS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(creds, f)
+    os.replace(tmp, CREDS_PATH)
+
+
+def _refresh_token(creds):
+    """Exchange the refresh token for a new access token; persist it so
+    Claude Code stays in sync. Returns the new access token, or None."""
+    o = creds.get("claudeAiOauth") or {}
+    rt = o.get("refreshToken")
+    if not rt:
+        return None
+    body = json.dumps({
+        "grant_type": "refresh_token",
+        "refresh_token": rt,
+        "client_id": OAUTH_CLIENT_ID,
+    }).encode("utf-8")
+    req = urllib.request.Request(TOKEN_URL, data=body, method="POST", headers={
+        "Content-Type": "application/json",
+        "User-Agent": "ClaudeUsageWidget/1.0",
+    })
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    at = data.get("access_token")
+    if not at:
+        return None
+    o["accessToken"] = at
+    if data.get("refresh_token"):
+        o["refreshToken"] = data["refresh_token"]
+    if data.get("expires_in"):
+        o["expiresAt"] = int(time.time() * 1000) + int(data["expires_in"]) * 1000
+    creds["claudeAiOauth"] = o
+    try:
+        _write_creds(creds)
+    except OSError:
+        pass
+    return at
+
+
+def get_access_token():
+    """Return a valid access token, refreshing it first if near expiry."""
+    creds = _read_creds()
+    o = creds.get("claudeAiOauth") or {}
+    token = o.get("accessToken")
+    exp = o.get("expiresAt")
+    if token and exp and (exp - time.time() * 1000) > TOKEN_SKEW_MS:
+        return token                      # still valid
+    try:
+        new = _refresh_token(creds)       # expired / about to — refresh
+        if new:
+            return new
+    except Exception:
+        pass
+    return token                          # fall back to the existing one
+
+
 def fetch_live():
     """Returns (rows, dt, 'live'), 'ratelimited', or None."""
     try:
-        with open(CREDS_PATH, "r", encoding="utf-8") as f:
-            creds = json.load(f)
-        token = (creds.get("claudeAiOauth") or {}).get("accessToken")
+        token = get_access_token()
         if not token:
             return None
         req = urllib.request.Request(USAGE_URL, headers={
