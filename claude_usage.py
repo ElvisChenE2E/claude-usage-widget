@@ -22,6 +22,7 @@ import json
 import math
 import time
 import threading
+import subprocess
 import urllib.request
 from datetime import datetime, timezone
 import tkinter as tk
@@ -45,6 +46,10 @@ DEFAULT_CONFIG = {
     "taskbar_height": 48,
     "glow": True,
     "icon_style": "logo",   # "logo" or "mascot" (click the icon to switch)
+    "notify": True,              # Windows toast notifications on/off
+    "notify_thresholds": [80, 95],   # alert when a limit crosses these %
+    "notify_reset": True,        # notify when the 5hr session resets
+    "notify_seconds": 6,         # how long a toast stays on screen
 }
 
 # --- Claude-style dark palette ---
@@ -398,6 +403,40 @@ def parse_ts(s):
         return None
 
 
+VBS_PATH = os.path.join(BASE_DIR, "start_claude_usage.vbs")
+STARTUP_LNK = os.path.join(
+    os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu",
+    "Programs", "Startup", "ClaudeUsage.lnk")
+
+
+def startup_enabled():
+    return os.path.exists(STARTUP_LNK)
+
+
+def set_startup(enable):
+    """Add or remove the 'run at login' shortcut. Returns the new state."""
+    if enable:
+        ps = (
+            "$ws=New-Object -ComObject WScript.Shell;"
+            f"$s=$ws.CreateShortcut('{STARTUP_LNK}');"
+            "$s.TargetPath='wscript.exe';"
+            f"$s.Arguments='\"{VBS_PATH}\"';"
+            f"$s.WorkingDirectory='{BASE_DIR}';$s.Save()"
+        )
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           creationflags=_CREATE_NO_WINDOW,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    else:
+        try:
+            os.remove(STARTUP_LNK)
+        except OSError:
+            pass
+    return startup_enabled()
+
+
 def fmt_reset(resets_at):
     dt = parse_ts(resets_at)
     if dt is None:
@@ -592,12 +631,210 @@ class UsageSource:
         return fetch_cached()
 
 
+_CREATE_NO_WINDOW = 0x08000000
+
+
+class Toast(tk.Toplevel):
+    """A self-drawn corner notification, themed like the widget. Independent
+    of Windows notification settings / Focus Assist, so it always shows."""
+    _active = []
+
+    def __init__(self, master, title, message, taskbar=48, timeout=6000):
+        super().__init__(master)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg=CORAL)
+        self._taskbar = taskbar
+        inner = tk.Frame(self, bg=BG)
+        inner.pack(padx=2, pady=2)
+        try:
+            self._img = _rasterize_logo(20)
+            tk.Label(inner, image=self._img, bg=BG).pack(
+                side="left", padx=(10, 8), pady=10)
+        except Exception:
+            pass
+        col = tk.Frame(inner, bg=BG)
+        col.pack(side="left", padx=(0, 12), pady=10)
+        tk.Label(col, text=title, bg=BG, fg=CORAL,
+                 font=("Segoe UI", 9, "bold"), anchor="w").pack(anchor="w")
+        tk.Label(col, text=message, bg=BG, fg=FG, font=("Segoe UI", 8),
+                 anchor="w", justify="left", wraplength=240).pack(anchor="w")
+        for w in (self, inner, col):
+            w.bind("<Button-1>", lambda e: self.close())
+        self.update_idletasks()
+        Toast._active.append(self)
+        self._place()
+        self.after(timeout, self.close)
+
+    def _place(self):
+        self.update_idletasks()
+        w, h = self.winfo_width(), self.winfo_height()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        # stack upward above any toasts already shown
+        offset = 0
+        for t in Toast._active:
+            if t is self:
+                break
+            if t.winfo_exists():
+                offset += t.winfo_height() + 8
+        x = sw - w - 16
+        y = sh - h - self._taskbar - 16 - offset
+        self.geometry(f"+{x}+{y}")
+
+    def close(self):
+        if self in Toast._active:
+            Toast._active.remove(self)
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
+
+class Popup(tk.Toplevel):
+    """Custom themed context menu: thin coral border, coral hover, flyout
+    submenus. (tk.Menu's thick system border can't be styled, so we draw
+    our own.)"""
+    CHAIN = []
+
+    def __init__(self, master, x, y, items):
+        super().__init__(master)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg=CORAL)
+        self.inner = tk.Frame(self, bg=BG)
+        self.inner.pack(padx=1, pady=1)   # 1px coral border
+        self.child = None
+        for it in items:
+            self._add_row(it)
+        self.update_idletasks()
+        # keep on screen
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        x = min(x, sw - w - 4)
+        y = min(y, sh - h - 4)
+        self.geometry(f"+{x}+{y}")
+        Popup.CHAIN.append(self)
+        self.focus_force()
+        self.bind("<FocusOut>", lambda e: self.after(150, self._check_focus))
+        self.bind("<Escape>", lambda e: Popup.close_all())
+
+    @staticmethod
+    def close_all():
+        for p in list(Popup.CHAIN):
+            try:
+                p.destroy()
+            except tk.TclError:
+                pass
+        Popup.CHAIN.clear()
+
+    def _check_focus(self):
+        try:
+            w = self.focus_get()
+        except (KeyError, tk.TclError):
+            w = None
+        if w is None or w.winfo_toplevel() not in Popup.CHAIN:
+            Popup.close_all()
+
+    def _open_sub(self, it, row):
+        self._close_sub()
+        x = self.winfo_rootx() + self.winfo_width() - 3
+        y = row.winfo_rooty() - 2
+        self.child = Popup(self, x, y, it["items"])
+
+    def _close_sub(self):
+        if self.child is not None:
+            if self.child in Popup.CHAIN:
+                Popup.CHAIN.remove(self.child)
+            try:
+                self.child.destroy()
+            except tk.TclError:
+                pass
+            self.child = None
+
+    def _add_row(self, it):
+        if it["type"] == "sep":
+            tk.Frame(self.inner, bg=TRACK, height=1).pack(
+                fill="x", padx=6, pady=3)
+            return
+        row = tk.Frame(self.inner, bg=BG)
+        row.pack(fill="x")
+        if it["type"] == "check":
+            mark = "✓" if it.get("on") else " "
+        elif it["type"] == "radio":
+            mark = "●" if it.get("on") else "○"
+        else:
+            mark = " "
+        ml = tk.Label(row, text=mark, bg=BG, fg=CORAL,
+                      font=("Segoe UI", 8), width=2, anchor="w")
+        ml.pack(side="left", padx=(8, 0), pady=3)
+        tl = tk.Label(row, text=it["label"], bg=BG, fg=FG,
+                      font=("Segoe UI", 9), anchor="w")
+        tl.pack(side="left", pady=3)
+        ar = None
+        if it["type"] == "sub":
+            ar = tk.Label(row, text="▸", bg=BG, fg=DIM, font=("Segoe UI", 9))
+            ar.pack(side="right", padx=(16, 8))
+        else:
+            tk.Frame(row, bg=BG, width=24).pack(side="right")
+        ws = [row, ml, tl] + ([ar] if ar else [])
+
+        def enter(e):
+            for w in ws:
+                w.configure(bg=CORAL)
+            ml.configure(fg=BG)
+            tl.configure(fg=BG)
+            if ar:
+                ar.configure(fg=BG)
+            if it["type"] == "sub":
+                self._open_sub(it, row)
+            else:
+                self._close_sub()
+
+        def leave(e):
+            for w in ws:
+                w.configure(bg=BG)
+            ml.configure(fg=CORAL)
+            tl.configure(fg=FG)
+            if ar:
+                ar.configure(fg=DIM)
+
+        def click(e):
+            if it["type"] == "sub":
+                self._open_sub(it, row)
+            else:
+                cmd = it.get("cmd")
+                Popup.close_all()
+                if cmd:
+                    cmd()
+            return "break"
+
+        for w in ws:
+            w.bind("<Enter>", enter)
+            w.bind("<Leave>", leave)
+            w.bind("<Button-1>", click)
+
+
+RED = "#ef5350"
+AMBER = "#e6c07b"
+
+
 def bar_color(pct):
-    if pct < 70:
-        return CORAL
-    if pct < 90:
-        return WARN
-    return "#ef5350"
+    """Gauge fill: coral up to 50%, amber above 50%, red above 80%."""
+    if pct > 80:
+        return RED
+    if pct > 50:
+        return AMBER
+    return CORAL
+
+
+def pct_color(pct):
+    """Compact-view % text: default up to 50%, amber above 50%, red above 80%."""
+    if pct > 80:
+        return RED
+    if pct > 50:
+        return AMBER
+    return FG
 
 
 def _hex(c):
@@ -632,6 +869,7 @@ class UsageApp:
         self.src = ""
         self.time_text = ""
         self.icon_style = self.cfg.get("icon_style", "logo")
+        self._prev = {}          # per-limit last {pct, resets_at} for alerts
         self.rows_data = []
         self.src_text = ""
         self._phase = 0.0
@@ -660,8 +898,10 @@ class UsageApp:
         w.bind("<B1-Motion>", self._on_move)
         w.bind("<ButtonRelease-1>", self._on_release)
         w.bind("<Double-Button-1>", self._on_double)
+        w.bind("<Button-3>", self._show_menu)
 
     def _start_move(self, e):
+        Popup.close_all()
         self._mx, self._my = e.x_root, e.y_root
         self._gx, self._gy = self.root.winfo_x(), self.root.winfo_y()
 
@@ -672,6 +912,81 @@ class UsageApp:
     def _toggle(self):
         self.expanded = not self.expanded
         self._render()
+
+    # ---- settings (right-click menu) ----
+    def _save_config(self):
+        try:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(self.cfg, f, indent=2)
+        except OSError:
+            pass
+
+    def _set(self, key, value):
+        """Set a config value, persist, apply, re-render."""
+        self.cfg[key] = value
+        if key == "icon_style":
+            self.icon_style = value
+        if key == "opacity":
+            self.root.attributes("-alpha", value)
+        self._save_config()
+        self._render()
+
+    def _menu_items(self):
+        cfg = self.cfg
+        op = cfg.get("opacity", 1.0)
+        rf = cfg.get("refresh_seconds", 60)
+        ns = cfg.get("notify_seconds", 6)
+        return [
+            {"type": "check", "label": "Usage notifications",
+             "on": cfg.get("notify", True),
+             "cmd": lambda: self._set("notify", not cfg.get("notify", True))},
+            {"type": "check", "label": "Alert on session reset",
+             "on": cfg.get("notify_reset", True),
+             "cmd": lambda: self._set("notify_reset",
+                                      not cfg.get("notify_reset", True))},
+            {"type": "cmd", "label": "Test notification",
+             "cmd": lambda: self.notify("Claude Usage",
+                                        "This is a test notification.")},
+            {"type": "sub", "label": "Notification time", "items": [
+                {"type": "radio", "label": f"{s} seconds", "on": ns == s,
+                 "cmd": (lambda s=s: self._set("notify_seconds", s))}
+                for s in (3, 6, 10, 15)]},
+            {"type": "sep"},
+            {"type": "radio", "label": "Icon: Claude logo",
+             "on": self.icon_style == "logo",
+             "cmd": lambda: self._set("icon_style", "logo")},
+            {"type": "radio", "label": "Icon: Mascot",
+             "on": self.icon_style == "mascot",
+             "cmd": lambda: self._set("icon_style", "mascot")},
+            {"type": "sep"},
+            {"type": "sub", "label": "Opacity", "items": [
+                {"type": "radio", "label": f"{p}%",
+                 "on": abs(op - p / 100) < 0.005,
+                 "cmd": (lambda p=p: self._set("opacity", p / 100))}
+                for p in (100, 95, 90, 80, 70)]},
+            {"type": "sub", "label": "Refresh every", "items": [
+                {"type": "radio", "label": lbl, "on": rf == s,
+                 "cmd": (lambda s=s: self._set("refresh_seconds", s))}
+                for lbl, s in (("30 seconds", 30), ("1 minute", 60),
+                               ("2 minutes", 120), ("5 minutes", 300))]},
+            {"type": "sep"},
+            {"type": "check", "label": "Start on boot",
+             "on": startup_enabled(),
+             "cmd": lambda: set_startup(not startup_enabled())},
+            {"type": "cmd", "label": "Reset position",
+             "cmd": self._reset_position},
+            {"type": "sep"},
+            {"type": "cmd", "label": "Quit", "cmd": self.root.destroy},
+        ]
+
+    def _show_menu(self, e):
+        Popup.close_all()
+        Popup(self.root, e.x_root, e.y_root, self._menu_items())
+        return "break"
+
+    def _reset_position(self):
+        self._anchor = None
+        self._place_bottom_right()
 
     def _on_double(self, e):
         self._dragged = False        # a double-click is never a drag
@@ -687,6 +1002,7 @@ class UsageApp:
         icon.bind("<B1-Motion>", self._on_move)
         icon.bind("<ButtonRelease-1>", self._icon_release)
         icon.bind("<Double-Button-1>", lambda e: "break")
+        icon.bind("<Button-3>", self._show_menu)
         return icon
 
     def _icon_release(self, e):
@@ -697,11 +1013,7 @@ class UsageApp:
             self.icon_style = ("mascot" if self.icon_style == "logo"
                                else "logo")
             self.cfg["icon_style"] = self.icon_style
-            try:
-                with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                    json.dump(self.cfg, f, indent=2)
-            except OSError:
-                pass
+            self._save_config()
             self._render()
         return "break"
 
@@ -762,7 +1074,8 @@ class UsageApp:
         icon.grid(row=0, column=0, rowspan=2, padx=(0, 8), sticky="w")
         for i, r in enumerate(self.rows_data):
             col = i + 1
-            lb = tk.Label(row, text=f"{r['short']} {r['pct']}%", bg=BG, fg=FG,
+            lb = tk.Label(row, text=f"{r['short']} {r['pct']}%", bg=BG,
+                          fg=pct_color(r["pct"]),
                           font=("Segoe UI", 9), pady=0, bd=0)
             lb.grid(row=0, column=col, padx=(0 if i == 0 else 10, 0),
                     sticky="s")
@@ -849,7 +1162,38 @@ class UsageApp:
         self.root.after(int(self.cfg.get("refresh_seconds", 60)) * 1000,
                         self.refresh)
 
+    def notify(self, title, message):
+        Toast(self.root, title, message,
+              taskbar=self.cfg.get("taskbar_height", 48),
+              timeout=int(self.cfg.get("notify_seconds", 6) * 1000))
+
+    def _check_alerts(self, rows):
+        if not self.cfg.get("notify", True):
+            return
+        thresholds = sorted(self.cfg.get("notify_thresholds", [80, 95]))
+        for r in rows:
+            key = r["label"]
+            prev = self._prev.get(key)
+            now = r["pct"]
+            if prev is not None:
+                pv = prev["pct"]
+                # threshold crossings (upward)
+                for t in thresholds:
+                    if pv < t <= now:
+                        self.notify(f"Claude usage {now}%",
+                                    f"{key} reached {t}% · resets in {r['reset']}")
+                        break
+                # 5hr session reset: resets_at jumped to a much later time
+                if (key.startswith("Session")
+                        and self.cfg.get("notify_reset", True)):
+                    a, b = parse_ts(prev.get("resets_at")), parse_ts(r.get("resets_at"))
+                    if a and b and (b - a).total_seconds() > 60:
+                        self.notify("Claude session reset",
+                                    "Your 5-hour session limit just reset.")
+            self._prev[key] = {"pct": now, "resets_at": r.get("resets_at")}
+
     def _got(self, rows, dt, src):
+        self._check_alerts(rows)
         self.rows_data = rows
         self.src = src
         self.time_text = f"{dt.astimezone():%H:%M}" if dt else ""
