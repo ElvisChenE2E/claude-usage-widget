@@ -50,7 +50,9 @@ DEFAULT_CONFIG = {
     "notify_thresholds": [80, 95],   # alert when a limit crosses these %
     "notify_reset": True,        # notify when the 5hr session resets
     "notify_seconds": 6,         # how long a toast stays on screen
+    "notify_sticky": False,      # keep toasts until the user dismisses them
 }
+STATE_PATH = os.path.join(BASE_DIR, "alert_state.json")
 
 # --- Claude-style dark palette ---
 BG = "#262624"        # card background (warm near-black)
@@ -672,6 +674,7 @@ class Toast(tk.Toplevel):
     _active = []
 
     def __init__(self, master, title, message, taskbar=48, timeout=6000):
+        # timeout=None keeps the toast until the user clicks it
         super().__init__(master)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -696,7 +699,8 @@ class Toast(tk.Toplevel):
         self.update_idletasks()
         Toast._active.append(self)
         self._place()
-        self.after(timeout, self.close)
+        if timeout:
+            self.after(timeout, self.close)
 
     def _place(self):
         self.update_idletasks()
@@ -901,7 +905,13 @@ class UsageApp:
         self.src = ""
         self.time_text = ""
         self.icon_style = self.cfg.get("icon_style", "logo")
-        self._prev = {}          # per-limit last {pct, resets_at} for alerts
+        # per-limit last {pct, resets_at} for alerts — persisted across
+        # restarts so crossings during a restart gap aren't missed
+        try:
+            with open(STATE_PATH, "r", encoding="utf-8") as f:
+                self._prev = json.load(f)
+        except Exception:
+            self._prev = {}
         self.rows_data = []
         self.src_text = ""
         self._phase = 0.0
@@ -952,6 +962,11 @@ class UsageApp:
         except OSError:
             pass
 
+    def _set_notify_time(self, seconds):
+        """Pick a timed duration (also turns sticky off)."""
+        self.cfg["notify_sticky"] = False
+        self._set("notify_seconds", seconds)
+
     def _set(self, key, value):
         """Set a config value, persist, apply, re-render."""
         self.cfg[key] = value
@@ -979,9 +994,13 @@ class UsageApp:
              "cmd": lambda: self.notify("Claude Usage",
                                         "This is a test notification.")},
             {"type": "sub", "label": "Notification time", "items": [
-                {"type": "radio", "label": f"{s} seconds", "on": ns == s,
-                 "cmd": (lambda s=s: self._set("notify_seconds", s))}
-                for s in (3, 6, 10, 15)]},
+                {"type": "radio", "label": f"{s} seconds",
+                 "on": not cfg.get("notify_sticky", False) and ns == s,
+                 "cmd": (lambda s=s: self._set_notify_time(s))}
+                for s in (3, 6, 10, 15)] + [
+                {"type": "radio", "label": "Until dismissed",
+                 "on": cfg.get("notify_sticky", False),
+                 "cmd": lambda: self._set("notify_sticky", True)}]},
             {"type": "sep"},
             {"type": "radio", "label": "Icon: Claude logo",
              "on": self.icon_style == "logo",
@@ -1207,9 +1226,11 @@ class UsageApp:
                         self.refresh)
 
     def notify(self, title, message):
+        sticky = self.cfg.get("notify_sticky", False)
         Toast(self.root, title, message,
               taskbar=self.cfg.get("taskbar_height", 48),
-              timeout=int(self.cfg.get("notify_seconds", 6) * 1000))
+              timeout=None if sticky
+              else int(self.cfg.get("notify_seconds", 6) * 1000))
 
     def _check_alerts(self, rows):
         if not self.cfg.get("notify", True):
@@ -1235,6 +1256,11 @@ class UsageApp:
                         self.notify("Claude session reset",
                                     "Your 5-hour session limit just reset.")
             self._prev[key] = {"pct": now, "resets_at": r.get("resets_at")}
+        try:
+            with open(STATE_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._prev, f)
+        except OSError:
+            pass
 
     def _got(self, rows, dt, src):
         self._check_alerts(rows)

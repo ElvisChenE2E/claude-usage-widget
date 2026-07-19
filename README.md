@@ -58,7 +58,8 @@ A themed menu — no config file editing needed. Every choice is saved to
 - **Usage notifications** — master on/off for toasts
 - **Alert on session reset** — notify when the 5-hour window resets
 - **Test notification** — fire a sample toast
-- **Notification time** — how long a toast stays (3 / 6 / 10 / 15 s)
+- **Notification time** — how long a toast stays (3 / 6 / 10 / 15 s, or
+  **Until dismissed** to keep it up until you click it)
 - **Icon** — Claude logo or Mascot
 - **Opacity** — 100 % … 70 %
 - **Refresh every** — 30 s / 1 / 2 / 5 min
@@ -73,6 +74,11 @@ Windows notification settings or Focus Assist) fire when:
 - a limit crosses **80 %** or **95 %** (configurable), so you don't hit the
   wall unexpectedly, and
 - your **5-hour session resets**.
+
+Each toast auto-dismisses after a few seconds, or stays until you click it
+(**Notification time → Until dismissed**). The last-seen percentages are
+remembered across restarts (`alert_state.json`), so a crossing during a
+restart isn't missed.
 
 Prefer to test visibility standalone? Run `python test_notify.py` — it shows
 three sample toasts stacked at the bottom-right.
@@ -129,7 +135,8 @@ Most of these are exposed in the gear menu; the table is the full list.
 | `notify` | Windows toast notifications on/off | true |
 | `notify_thresholds` | Percentages that trigger an alert | [80, 95] |
 | `notify_reset` | Notify when the 5-hour session resets | true |
-| `notify_seconds` | How long a toast stays on screen | 6 |
+| `notify_seconds` | How long a toast stays on screen (seconds) | 6 |
+| `notify_sticky` | Keep toasts until dismissed (overrides `notify_seconds`) | false |
 
 **Start on boot** is handled by the menu (it creates a shortcut in
 `shell:startup`), so there's no config key for it.
