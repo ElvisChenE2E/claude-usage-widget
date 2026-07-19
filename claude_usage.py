@@ -245,19 +245,43 @@ def parse_path(d):
 CLAUDE_SUBPATHS = parse_path(CLAUDE_PATH)
 
 
+def _gear_subpaths(teeth=6, r_out=12.0, r_in=8.8, r_hole=4.6, cx=12.0, cy=12.0):
+    """Build a clean geometric gear (outer toothed outline + centre hole)
+    in a 24x24 space. Chunky teeth so it stays crisp at ~13px."""
+    step = 2 * math.pi / teeth
+    tw = step * 0.5           # tooth occupies half of each step
+    edge = step * 0.14        # slight bevel on the tooth sides
+    outer = []
+    for i in range(teeth):
+        base = i * step - math.pi / 2
+        for ang, r in ((base, r_in),
+                       (base + edge, r_out),
+                       (base + tw - edge, r_out),
+                       (base + tw, r_in)):
+            outer.append((cx + math.cos(ang) * r, cy + math.sin(ang) * r))
+    hole = []
+    n = 32
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        hole.append((cx + math.cos(a) * r_hole, cy + math.sin(a) * r_hole))
+    return [outer, hole]
+
+
+GEAR_SUBPATHS = _gear_subpaths()
+
 _ICON_CACHE = {}
 
 
-def _rasterize_logo(size, color=CORAL, bg=BG, ss=4):
-    """Rasterize the logo path into a PhotoImage with supersampled
-    anti-aliasing: scanline-fill at ss x resolution, then box-downsample,
-    blending edge pixels between `color` and `bg`."""
-    key = (size, color, bg)
+def _rasterize_svg(name, subpaths, size, color=CORAL, bg=BG, ss=4):
+    """Rasterize an SVG subpath list (viewBox 24) into a PhotoImage with
+    supersampled anti-aliasing: even-odd scanline fill at ss x resolution,
+    then box-downsample, blending edge pixels between `color` and `bg`."""
+    key = (name, size, color, bg)
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
     big = size * ss
     s = big / 24.0
-    polys = [[(x * s, y * s) for (x, y) in sub] for sub in CLAUDE_SUBPATHS]
+    polys = [[(x * s, y * s) for (x, y) in sub] for sub in subpaths]
 
     # scanline even-odd fill into a bitmask
     mask = [[False] * big for _ in range(big)]
@@ -299,6 +323,14 @@ def _rasterize_logo(size, color=CORAL, bg=BG, ss=4):
     img.put(" ".join(rows))
     _ICON_CACHE[key] = img
     return img
+
+
+def _rasterize_logo(size, color=CORAL, bg=BG, ss=4):
+    return _rasterize_svg("logo", CLAUDE_SUBPATHS, size, color, bg, ss)
+
+
+def _rasterize_gear(size, color=CORAL, bg=BG, ss=4):
+    return _rasterize_svg("gear", GEAR_SUBPATHS, size, color, bg, ss)
 
 
 class ClaudeIcon(tk.Label):
@@ -898,7 +930,6 @@ class UsageApp:
         w.bind("<B1-Motion>", self._on_move)
         w.bind("<ButtonRelease-1>", self._on_release)
         w.bind("<Double-Button-1>", self._on_double)
-        w.bind("<Button-3>", self._show_menu)
 
     def _start_move(self, e):
         Popup.close_all()
@@ -975,8 +1006,6 @@ class UsageApp:
              "cmd": lambda: set_startup(not startup_enabled())},
             {"type": "cmd", "label": "Reset position",
              "cmd": self._reset_position},
-            {"type": "sep"},
-            {"type": "cmd", "label": "Quit", "cmd": self.root.destroy},
         ]
 
     def _show_menu(self, e):
@@ -1002,8 +1031,19 @@ class UsageApp:
         icon.bind("<B1-Motion>", self._on_move)
         icon.bind("<ButtonRelease-1>", self._icon_release)
         icon.bind("<Double-Button-1>", lambda e: "break")
-        icon.bind("<Button-3>", self._show_menu)
         return icon
+
+    def _make_gear(self, parent, size=13):
+        """Settings gear button: dim, coral on hover, opens the menu."""
+        dim = _rasterize_gear(size, DIM, BG)
+        hot = _rasterize_gear(size, CORAL, BG)
+        g = tk.Label(parent, image=dim, bg=BG, bd=0, cursor="hand2")
+        g._dim, g._hot = dim, hot
+        g.configure(image=dim)
+        g.bind("<Enter>", lambda e: g.configure(image=hot))
+        g.bind("<Leave>", lambda e: g.configure(image=dim))
+        g.bind("<Button-1>", self._show_menu)
+        return g
 
     def _icon_release(self, e):
         # plain click on the icon switches style; a drag still moves
@@ -1085,10 +1125,12 @@ class UsageApp:
             rs.grid(row=1, column=col, padx=(0 if i == 0 else 10, 0),
                     pady=(0, 0), sticky="n")
             widgets.append(rs)
+        ncol = len(self.rows_data) + 1
+        gear = self._make_gear(row, size=10)
+        gear.grid(row=0, column=ncol, padx=(8, 0), sticky="s")
         close = tk.Label(row, text="✕", bg=BG, fg=DIM, cursor="hand2",
                          font=("Segoe UI", 7), pady=0, bd=0)
-        close.grid(row=0, column=len(self.rows_data) + 1, rowspan=2,
-                   padx=(8, 0), sticky="ne")
+        close.grid(row=0, column=ncol + 1, padx=(4, 0), sticky="s")
         close.bind("<Button-1>", lambda e: self.root.destroy())
         close.bind("<Enter>", lambda e: close.config(fg=CORAL))
         close.bind("<Leave>", lambda e: close.config(fg=DIM))
@@ -1105,11 +1147,13 @@ class UsageApp:
                  font=("Segoe UI", 9, "bold")).pack(side="left")
         close = tk.Label(head, text="✕", bg=BG, fg=DIM, cursor="hand2",
                          font=("Segoe UI", 8))
-        close.pack(side="right", padx=(8, 0))
+        close.pack(side="right", padx=(3, 0))
         close.bind("<Button-1>", lambda e: self.root.destroy())
         close.bind("<Enter>", lambda e: close.config(fg=CORAL))
         close.bind("<Leave>", lambda e: close.config(fg=DIM))
-        self._no_move = {close, icon}   # keep their click bindings intact
+        gear = self._make_gear(head, size=11)
+        gear.pack(side="right", padx=(10, 0))
+        self._no_move = {close, icon, gear}   # keep their click bindings intact
         # LIVE/CACHED indicator + fetch time (replaces the old "live HH:MM")
         ind, _ = self._indicator(head, size=5)
         ind.pack(side="right", padx=(6, 0))

@@ -21,7 +21,7 @@ The percentage/gauge turns **amber above 50%** and **red above 80%**.
 
 ![Mascot view](Demo_Mascot.png)
 
-**Settings** — right-click for a themed menu
+**Settings** — click the ⚙ gear for a themed menu
 
 ![Settings menu](Demo_Menu.png)
 
@@ -36,7 +36,7 @@ The percentage/gauge turns **amber above 50%** and **red above 80%**.
   **red above 80%** so a tight limit is obvious at a glance.
 - **Notifications** — a self-drawn toast pops when you cross a threshold or
   when the 5-hour session resets (see below).
-- **Right-click settings menu** — toggle everything without touching a file.
+- **Settings menu** — click the gear to toggle everything without touching a file.
 - **Switchable icon** — Claude logo or an animated pixel mascot.
 
 ## Usage
@@ -46,11 +46,11 @@ The percentage/gauge turns **amber above 50%** and **red above 80%**.
 | Double-click `start_claude_usage.vbs` | Start silently (no console window) |
 | Double-click the widget | Toggle collapsed ⇄ expanded |
 | Click the icon | Switch between the Claude logo and the animated mascot |
-| Right-click the widget | Open the settings menu |
+| Click the ⚙ gear | Open the settings menu |
 | Drag | Move the widget (it stays where you drop it) |
 | Click the ✕ | Quit |
 
-## Settings menu (right-click)
+## Settings menu (⚙ gear)
 
 A themed menu — no config file editing needed. Every choice is saved to
 `config.json` and applied immediately.
@@ -64,7 +64,6 @@ A themed menu — no config file editing needed. Every choice is saved to
 - **Refresh every** — 30 s / 1 / 2 / 5 min
 - **Start on boot** — add/remove the login shortcut
 - **Reset position** — snap back to the bottom-right corner
-- **Quit**
 
 ## Notifications
 
@@ -117,7 +116,7 @@ so just copy this folder to another machine and run it.
 
 ## Settings (`config.json`)
 
-Most of these are exposed in the right-click menu; the table is the full list.
+Most of these are exposed in the gear menu; the table is the full list.
 
 | Key | Description | Default |
 |---|---|---|
