@@ -15,9 +15,15 @@ Pure Python standard library + tkinter — **no third-party packages, no API key
 
 ![Expanded view](Demo_Expanded.png)
 
+The percentage/gauge turns **amber above 50%** and **red above 80%**.
+
 **Mascot** — click the icon to switch between the Claude logo and an animated pixel mascot
 
 ![Mascot view](Demo_Mascot.png)
+
+**Settings** — right-click for a themed menu
+
+![Settings menu](Demo_Menu.png)
 
 ## Features
 
