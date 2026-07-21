@@ -1190,23 +1190,31 @@ class UsageApp:
                          else f"Resets in {r['reset']}")
             tk.Label(top, text=reset_txt, bg=BG, fg=DIM,
                      font=("Segoe UI", 7)).pack(side="right")
-            # gauge: thick bar with the percentage printed on it
+            # gauge: thick bar with the percentage printed on it. The canvas
+            # stretches with fill="x", so draw against its real width (a fixed
+            # BAR_W would leave 100% visibly unfilled).
             c = tk.Canvas(block, width=BAR_W, height=BAR_H, bg=TRACK,
                           highlightthickness=0)
             c.pack(fill="x", pady=(3, 0))
             pct = max(0, min(100, r["pct"]))
-            fill_w = int(BAR_W * pct / 100)
-            if fill_w:
-                c.create_rectangle(0, 0, fill_w, BAR_H,
-                                   fill=bar_color(pct), outline="")
-            # put the % label inside the filled part if it fits, else after it
             txt = f"{r['pct']}%"
-            if fill_w > 34:
-                c.create_text(fill_w - 5, BAR_H // 2, text=txt, anchor="e",
-                              fill="#1d1d1b", font=("Segoe UI", 8, "bold"))
-            else:
-                c.create_text(fill_w + 5, BAR_H // 2, text=txt, anchor="w",
-                              fill=FG, font=("Segoe UI", 8, "bold"))
+
+            def draw(event=None, c=c, pct=pct, txt=txt):
+                w = event.width if event else c.winfo_width()
+                c.delete("all")
+                fill_w = int(round(w * pct / 100))
+                if fill_w:
+                    c.create_rectangle(0, 0, fill_w, BAR_H,
+                                       fill=bar_color(pct), outline="")
+                # % inside the filled part if it fits, else just after it
+                if fill_w > 34:
+                    c.create_text(fill_w - 5, BAR_H // 2, text=txt, anchor="e",
+                                  fill="#1d1d1b", font=("Segoe UI", 8, "bold"))
+                else:
+                    c.create_text(fill_w + 5, BAR_H // 2, text=txt, anchor="w",
+                                  fill=FG, font=("Segoe UI", 8, "bold"))
+
+            c.bind("<Configure>", draw)
         tk.Frame(self.content, bg=BG, height=7).pack()
         skip = getattr(self, "_no_move", set())
         for w in self.content.winfo_children():
